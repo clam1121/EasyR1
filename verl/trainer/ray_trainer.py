@@ -455,6 +455,7 @@ class RayPPOTrainer:
 
         # Write validation results to CSV
         csv_path = os.path.join(self.config.trainer.save_checkpoint_path, "validation_results.csv")
+        os.makedirs(os.path.dirname(csv_path), exist_ok=True)
         file_exists = os.path.exists(csv_path)
         with open(csv_path, "a", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=["step", "prompt", "image_paths", "output", "ground_truth", "reward"])
