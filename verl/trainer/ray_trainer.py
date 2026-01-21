@@ -16,6 +16,7 @@ PPO Trainer with Ray-based single controller.
 This trainer supports model-agonistic model initialization with huggingface.
 """
 
+import csv
 import json
 import os
 import uuid
@@ -451,6 +452,24 @@ class RayPPOTrainer:
                 length_metrics_lst[key].append(value)
 
         self.actor_rollout_ref_wg.release_rollout_engine()
+
+        # Write validation results to CSV
+        csv_path = os.path.join(self.config.trainer.save_checkpoint_path, "validation_results.csv")
+        file_exists = os.path.exists(csv_path)
+        with open(csv_path, "a", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=["step", "prompt", "image_paths", "output", "ground_truth", "reward"])
+            if not file_exists:
+                writer.writeheader()
+            for prompt, output, label, score, images in zip(sample_inputs, sample_outputs, sample_labels, sample_scores, sample_images):
+                writer.writerow({
+                    "step": self.global_step,
+                    "prompt": prompt,
+                    "image_paths": images,
+                    "output": output,
+                    "ground_truth": label,
+                    "reward": score,
+                })
+
         self._maybe_log_val_generations(sample_inputs, sample_outputs, sample_labels, sample_scores, sample_images)
         self.val_reward_score = torch.cat(reward_tensor_lst, dim=0).sum(-1).mean().item()
         val_reward_metrics = {f"val/{key}_reward": value for key, value in reduce_metrics(reward_metrics_lst).items()}
