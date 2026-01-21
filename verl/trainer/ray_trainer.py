@@ -372,14 +372,16 @@ class RayPPOTrainer:
             print(f"No dataloader state found at {dataloader_path}, will start from scratch.")
 
     def _maybe_log_val_generations(
-        self, inputs: list[str], outputs: list[str], labels: list[str], scores: list[float]
+        self, inputs: list[str], outputs: list[str], labels: list[str], scores: list[float], images: list[str] = None
     ) -> None:
         """Log a table of validation samples"""
         if self.config.trainer.val_generations_to_log <= 0:
             return
 
-        # Create tuples of (input, output, score) and sort by input text
-        samples = list(zip(inputs, outputs, labels, scores))
+        # Create tuples of (input, output, label, score, image) and sort by input text
+        if images is None:
+            images = [""] * len(inputs)
+        samples = list(zip(inputs, outputs, labels, scores, images))
         samples.sort(key=lambda x: x[0])  # Sort by input text
 
         # Use fixed random seed for deterministic shuffling
@@ -392,7 +394,7 @@ class RayPPOTrainer:
     def _validate(self) -> dict[str, Any]:
         reward_tensor_lst = []
         # Lists to collect samples for the table
-        sample_inputs, sample_outputs, sample_labels, sample_scores = [], [], [], []
+        sample_inputs, sample_outputs, sample_labels, sample_scores, sample_images = [], [], [], [], []
         reward_metrics_lst = defaultdict(list)
         length_metrics_lst = defaultdict(list)
         print("Start validation...")
@@ -431,6 +433,16 @@ class RayPPOTrainer:
             sample_labels.extend(test_batch.non_tensor_batch["ground_truth"].tolist())
             sample_scores.extend(scores)
 
+            # collect image information if available
+            if "multi_modal_data" in test_batch.non_tensor_batch:
+                for mm_data in test_batch.non_tensor_batch["multi_modal_data"]:
+                    if mm_data and "images" in mm_data:
+                        sample_images.append(",".join(str(img) for img in mm_data["images"]))
+                    else:
+                        sample_images.append("")
+            else:
+                sample_images.extend([""] * len(input_texts))
+
             reward_tensor_lst.append(reward_tensor)
             for key, value in reward_metrics.items():
                 reward_metrics_lst[key].extend(value)
@@ -439,7 +451,7 @@ class RayPPOTrainer:
                 length_metrics_lst[key].append(value)
 
         self.actor_rollout_ref_wg.release_rollout_engine()
-        self._maybe_log_val_generations(sample_inputs, sample_outputs, sample_labels, sample_scores)
+        self._maybe_log_val_generations(sample_inputs, sample_outputs, sample_labels, sample_scores, sample_images)
         self.val_reward_score = torch.cat(reward_tensor_lst, dim=0).sum(-1).mean().item()
         val_reward_metrics = {f"val/{key}_reward": value for key, value in reduce_metrics(reward_metrics_lst).items()}
         val_length_metrics = {f"val_{key}": value for key, value in reduce_metrics(length_metrics_lst).items()}

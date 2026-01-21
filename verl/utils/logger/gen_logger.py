@@ -13,10 +13,11 @@
 # limitations under the License.
 
 
+import csv
 import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional, Tuple, Union
 
 from ..py_functional import is_package_available
 
@@ -40,7 +41,8 @@ class GenerationLogger(ABC):
 @dataclass
 class ConsoleGenerationLogger(GenerationLogger):
     def log(self, samples: List[Tuple[str, str, str, float]], step: int) -> None:
-        for inp, out, lab, score in samples:
+        for sample in samples:
+            inp, out, lab, score = sample[0], sample[1], sample[2], sample[3]
             print(f"[prompt] {inp}\n[output] {out}\n[ground_truth] {lab}\n[score] {score}\n")
 
 
@@ -48,7 +50,8 @@ class ConsoleGenerationLogger(GenerationLogger):
 class FileGenerationLogger(GenerationLogger):
     def log(self, samples: List[Tuple[str, str, str, float]], step: int) -> None:
         with open(os.path.join(self.config["trainer"]["save_checkpoint_path"], "generations.log"), "a") as f:
-            for inp, out, lab, score in samples:
+            for sample in samples:
+                inp, out, lab, score = sample[0], sample[1], sample[2], sample[3]
                 f.write(f"[prompt] {inp}\n[output] {out}\n[ground_truth] {lab}\n[score] {score}\n\n")
 
 
@@ -72,7 +75,7 @@ class WandbGenerationLogger(GenerationLogger):
         # Add new row with all data
         row_data = [step]
         for sample in samples:
-            row_data.extend(sample)
+            row_data.extend(sample[:4])  # Only use first 4 elements (input, output, label, score)
 
         new_table.add_data(*row_data)
         wandb.log({"val/generations": new_table}, step=step)
@@ -92,11 +95,37 @@ class SwanlabGenerationLogger(GenerationLogger):
         swanlab.log({"val/generations": swanlab_text_list}, step=step)
 
 
+@dataclass
+class CSVGenerationLogger(GenerationLogger):
+    def log(self, samples: List[Union[Tuple[str, str, str, float], Tuple[str, str, str, float, str]]], step: int) -> None:
+        csv_path = os.path.join(self.config["trainer"]["save_checkpoint_path"], "validation_generations.csv")
+        file_exists = os.path.exists(csv_path)
+
+        with open(csv_path, "a", newline="", encoding="utf-8") as f:
+            fieldnames = ["step", "prompt", "output", "ground_truth", "reward", "image_paths"]
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+
+            if not file_exists:
+                writer.writeheader()
+
+            for sample in samples:
+                row = {
+                    "step": step,
+                    "prompt": sample[0],
+                    "output": sample[1],
+                    "ground_truth": sample[2],
+                    "reward": sample[3],
+                    "image_paths": sample[4] if len(sample) > 4 else "",
+                }
+                writer.writerow(row)
+
+
 GEN_LOGGERS = {
     "console": ConsoleGenerationLogger,
     "file": FileGenerationLogger,
     "wandb": WandbGenerationLogger,
     "swanlab": SwanlabGenerationLogger,
+    "csv": CSVGenerationLogger,
 }
 
 
