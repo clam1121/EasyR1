@@ -16,7 +16,9 @@ PPO Trainer with Ray-based single controller.
 This trainer supports model-agonistic model initialization with huggingface.
 """
 
+import base64
 import csv
+import io
 import json
 import os
 import uuid
@@ -434,25 +436,24 @@ class RayPPOTrainer:
             sample_labels.extend(test_batch.non_tensor_batch["ground_truth"].tolist())
             sample_scores.extend(scores)
 
-            # collect and save image information if available
+            # collect image information and convert to base64
             if "multi_modal_data" in test_batch.non_tensor_batch:
-                images_dir = os.path.join(self.config.trainer.save_checkpoint_path, "validation_images", f"step_{self.global_step}")
-                os.makedirs(images_dir, exist_ok=True)
-
-                for sample_idx, mm_data in enumerate(test_batch.non_tensor_batch["multi_modal_data"]):
+                for mm_data in test_batch.non_tensor_batch["multi_modal_data"]:
                     if mm_data and "images" in mm_data:
-                        saved_paths = []
-                        for img_idx, img in enumerate(mm_data["images"]):
+                        image_base64_list = []
+                        for img in mm_data["images"]:
                             # Check if img is a PIL Image object
                             if hasattr(img, 'save'):
-                                img_filename = f"sample_{len(sample_images) + sample_idx}_image_{img_idx}.png"
-                                img_path = os.path.join(images_dir, img_filename)
-                                img.save(img_path)
-                                saved_paths.append(img_path)
+                                # Convert PIL Image to base64
+                                buffered = io.BytesIO()
+                                img.save(buffered, format="PNG")
+                                img_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
+                                image_base64_list.append(img_base64)
                             else:
-                                # If it's already a path string, just use it
-                                saved_paths.append(str(img))
-                        sample_images.append(",".join(saved_paths))
+                                # If it's a path, try to read and encode it
+                                image_base64_list.append(str(img))
+                        # Use ||| as separator for multiple images
+                        sample_images.append("|||".join(image_base64_list))
                     else:
                         sample_images.append("")
             else:
@@ -472,14 +473,14 @@ class RayPPOTrainer:
         os.makedirs(os.path.dirname(csv_path), exist_ok=True)
         file_exists = os.path.exists(csv_path)
         with open(csv_path, "a", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=["step", "prompt", "image_paths", "output", "ground_truth", "reward"])
+            writer = csv.DictWriter(f, fieldnames=["step", "prompt", "images", "output", "ground_truth", "reward"])
             if not file_exists:
                 writer.writeheader()
             for prompt, output, label, score, images in zip(sample_inputs, sample_outputs, sample_labels, sample_scores, sample_images):
                 writer.writerow({
                     "step": self.global_step,
                     "prompt": prompt,
-                    "image_paths": images,
+                    "images": images,
                     "output": output,
                     "ground_truth": label,
                     "reward": score,
