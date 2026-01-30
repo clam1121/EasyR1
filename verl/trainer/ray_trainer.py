@@ -434,11 +434,25 @@ class RayPPOTrainer:
             sample_labels.extend(test_batch.non_tensor_batch["ground_truth"].tolist())
             sample_scores.extend(scores)
 
-            # collect image information if available
+            # collect and save image information if available
             if "multi_modal_data" in test_batch.non_tensor_batch:
-                for mm_data in test_batch.non_tensor_batch["multi_modal_data"]:
+                images_dir = os.path.join(self.config.trainer.save_checkpoint_path, "validation_images", f"step_{self.global_step}")
+                os.makedirs(images_dir, exist_ok=True)
+
+                for sample_idx, mm_data in enumerate(test_batch.non_tensor_batch["multi_modal_data"]):
                     if mm_data and "images" in mm_data:
-                        sample_images.append(",".join(str(img) for img in mm_data["images"]))
+                        saved_paths = []
+                        for img_idx, img in enumerate(mm_data["images"]):
+                            # Check if img is a PIL Image object
+                            if hasattr(img, 'save'):
+                                img_filename = f"sample_{len(sample_images) + sample_idx}_image_{img_idx}.png"
+                                img_path = os.path.join(images_dir, img_filename)
+                                img.save(img_path)
+                                saved_paths.append(img_path)
+                            else:
+                                # If it's already a path string, just use it
+                                saved_paths.append(str(img))
+                        sample_images.append(",".join(saved_paths))
                     else:
                         sample_images.append("")
             else:
