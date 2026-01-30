@@ -16,8 +16,6 @@ PPO Trainer with Ray-based single controller.
 This trainer supports model-agonistic model initialization with huggingface.
 """
 
-import base64
-import csv
 import io
 import json
 import os
@@ -436,28 +434,16 @@ class RayPPOTrainer:
             sample_labels.extend(test_batch.non_tensor_batch["ground_truth"].tolist())
             sample_scores.extend(scores)
 
-            # collect image information and convert to base64
+            # collect image objects for Excel
             if "multi_modal_data" in test_batch.non_tensor_batch:
                 for mm_data in test_batch.non_tensor_batch["multi_modal_data"]:
                     if mm_data and "images" in mm_data:
-                        image_base64_list = []
-                        for img in mm_data["images"]:
-                            # Check if img is a PIL Image object
-                            if hasattr(img, 'save'):
-                                # Convert PIL Image to base64
-                                buffered = io.BytesIO()
-                                img.save(buffered, format="PNG")
-                                img_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
-                                image_base64_list.append(img_base64)
-                            else:
-                                # If it's a path, try to read and encode it
-                                image_base64_list.append(str(img))
-                        # Use ||| as separator for multiple images
-                        sample_images.append("|||".join(image_base64_list))
+                        # Store list of PIL Image objects
+                        sample_images.append(list(mm_data["images"]))
                     else:
-                        sample_images.append("")
+                        sample_images.append([])
             else:
-                sample_images.extend([""] * len(input_texts))
+                sample_images.extend([[]] * len(input_texts))
 
             reward_tensor_lst.append(reward_tensor)
             for key, value in reward_metrics.items():
@@ -468,23 +454,80 @@ class RayPPOTrainer:
 
         self.actor_rollout_ref_wg.release_rollout_engine()
 
-        # Write validation results to CSV
-        csv_path = os.path.join(self.config.trainer.save_checkpoint_path, "validation_results.csv")
-        os.makedirs(os.path.dirname(csv_path), exist_ok=True)
-        file_exists = os.path.exists(csv_path)
-        with open(csv_path, "a", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=["step", "prompt", "images", "output", "ground_truth", "reward"])
-            if not file_exists:
-                writer.writeheader()
-            for prompt, output, label, score, images in zip(sample_inputs, sample_outputs, sample_labels, sample_scores, sample_images):
-                writer.writerow({
-                    "step": self.global_step,
-                    "prompt": prompt,
-                    "images": images,
-                    "output": output,
-                    "ground_truth": label,
-                    "reward": score,
-                })
+        # Write validation results to Excel with embedded images
+        try:
+            from openpyxl import Workbook, load_workbook
+            from openpyxl.drawing.image import Image as XLImage
+            from openpyxl.utils import get_column_letter
+        except ImportError:
+            print("Warning: openpyxl not installed. Skipping Excel export. Install with: pip install openpyxl")
+            self._maybe_log_val_generations(sample_inputs, sample_outputs, sample_labels, sample_scores, sample_images)
+            self.val_reward_score = torch.cat(reward_tensor_lst, dim=0).sum(-1).mean().item()
+            val_reward_metrics = {f"val/{key}_reward": value for key, value in reduce_metrics(reward_metrics_lst).items()}
+            val_length_metrics = {f"val_{key}": value for key, value in reduce_metrics(length_metrics_lst).items()}
+            print("Finish validation.")
+            return {"val/reward_score": self.val_reward_score, **val_reward_metrics, **val_length_metrics}
+
+        xlsx_path = os.path.join(self.config.trainer.save_checkpoint_path, "validation_results.xlsx")
+        os.makedirs(os.path.dirname(xlsx_path), exist_ok=True)
+
+        # Load existing workbook or create new one
+        if os.path.exists(xlsx_path):
+            wb = load_workbook(xlsx_path)
+            ws = wb.active
+            start_row = ws.max_row + 1
+        else:
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Validation Results"
+            # Write headers
+            headers = ["Step", "Prompt", "Images", "Output", "Ground Truth", "Reward"]
+            for col_idx, header in enumerate(headers, 1):
+                ws.cell(row=1, column=col_idx, value=header)
+            start_row = 2
+
+        # Write data and insert images
+        for idx, (prompt, output, label, score, images) in enumerate(zip(sample_inputs, sample_outputs, sample_labels, sample_scores, sample_images)):
+            row = start_row + idx
+            ws.cell(row=row, column=1, value=self.global_step)
+            ws.cell(row=row, column=2, value=prompt)
+            ws.cell(row=row, column=4, value=output)
+            ws.cell(row=row, column=5, value=label)
+            ws.cell(row=row, column=6, value=score)
+
+            # Set row height for images
+            ws.row_dimensions[row].height = 150
+
+            # Insert images
+            if images and len(images) > 0:
+                for img_idx, img in enumerate(images):
+                    if hasattr(img, 'save'):
+                        # Save PIL Image to BytesIO
+                        img_buffer = io.BytesIO()
+                        img.save(img_buffer, format='PNG')
+                        img_buffer.seek(0)
+
+                        # Create Excel image and insert
+                        xl_img = XLImage(img_buffer)
+                        xl_img.width = 100
+                        xl_img.height = 100
+
+                        # Place image in Images column (column 3)
+                        # Offset multiple images horizontally
+                        cell = ws.cell(row=row, column=3)
+                        xl_img.anchor = f"{get_column_letter(3)}{row}"
+                        ws.add_image(xl_img)
+
+        # Adjust column widths
+        ws.column_dimensions['A'].width = 10
+        ws.column_dimensions['B'].width = 40
+        ws.column_dimensions['C'].width = 30
+        ws.column_dimensions['D'].width = 50
+        ws.column_dimensions['E'].width = 20
+        ws.column_dimensions['F'].width = 10
+
+        wb.save(xlsx_path)
+        print(f"Validation results saved to: {xlsx_path}")
 
         self._maybe_log_val_generations(sample_inputs, sample_outputs, sample_labels, sample_scores, sample_images)
         self.val_reward_score = torch.cat(reward_tensor_lst, dim=0).sum(-1).mean().item()
